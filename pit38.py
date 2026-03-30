@@ -652,11 +652,8 @@ def main():
         wht = cd["wht_div_pln"] + cd["wht_int_pln"]
         podatek_19 = round(przychod * 0.19, 2)
         wht_r = round(wht, 2)
-        do_zaplaty = round(podatek_19 - wht_r, 2)
-
-        kontrola_poz47 += podatek_19
-        kontrola_poz48 += wht_r
-        kontrola_poz49 += do_zaplaty
+        do_zaplaty = round(max(0, podatek_19 - wht_r), 2)
+        nadwyzka = wht_r > podatek_19
 
         print(f"  Kraj: {c} ({name})")
         print(f"    Dywidendy:               {cd['dividends_pln']:>10.2f} PLN")
@@ -664,19 +661,14 @@ def main():
         print(f"    Przychod brutto:         {przychod:>10.2f} PLN")
         print(f"    poz. 47 Podatek 19%:     {podatek_19:>10.2f} PLN")
         print(f"    poz. 48 WHT zaplacony:   {wht_r:>10.2f} PLN")
-        print(f"    poz. 49 Do zaplaty:      {do_zaplaty:>10.2f} PLN")
+        print(f"    poz. 49 Do zaplaty:      {do_zaplaty:>10.2f} PLN"
+              + ("  *** WHT przekracza podatek nalezny — nadwyzka przepada" if nadwyzka else ""))
         print()
 
-    print("  KONTROLA (suma PIT/ZG vs PIT-38 czesc G):")
-    def _chk(a, b):
-        diff = abs(round(a, 2) - round(b, 2))
-        return "OK" if diff < 0.015 else f"ROZNICA ({diff:.2f})"
-    print(f"    Suma poz.47 PIT/ZG:    {kontrola_poz47:>10.2f}  vs  poz. 47: {poz47_val:>10.2f}"
-          f"  {_chk(kontrola_poz47, poz47_val)}")
-    print(f"    Suma poz.48 PIT/ZG:    {kontrola_poz48:>10.2f}  vs  poz. 48: {poz48_val:>10.2f}"
-          f"  {_chk(kontrola_poz48, poz48_val)}")
-    print(f"    Suma poz.49 PIT/ZG:    {kontrola_poz49:>10.2f}  vs  poz. 49: {poz49_val:>10.2f}"
-          f"  {_chk(kontrola_poz49, poz49_val)}")
+    print("  KONTROLA (PIT38_Summary jest zrodlem prawdy):")
+    print(f"    poz. 47: {poz47_val:>10.2f} PLN")
+    print(f"    poz. 48: {poz48_val:>10.2f} PLN")
+    print(f"    poz. 49: {poz49_val:>10.2f} PLN")
     print()
 
     # --- Export Excel ---
@@ -770,6 +762,8 @@ def main():
                 ("poz. 49 — Do zaplaty (poz. 47 minus poz. 48)", poz49),
                 ("", ""),
                 ("WYMAGA POTWIERDZENIA PRZED ZLOZENIEM:", ""),
+                ("[ ] Podzial dywidend per kraj — potrzebny do PIT/ZG", ""),
+                ("[ ] Podzial odsetek per kraj — potrzebny do PIT/ZG", ""),
                 ("[ ] Weryfikacja stawek WHT per umowa UPO dla kazdego kraju", ""),
                 ("[ ] Sprawdzenie kompletnosci danych (Dividend Report / Form 1042-S z IBKR)", ""),
             ]
@@ -786,7 +780,8 @@ def main():
                 wht = cd["wht_div_pln"] + cd["wht_int_pln"]
                 podatek_19 = round(przychod * 0.19, 2)
                 wht_r = round(wht, 2)
-                do_zaplaty = round(podatek_19 - wht_r, 2)
+                do_zaplaty = round(max(0, podatek_19 - wht_r), 2)
+                nadwyzka = wht_r > podatek_19
 
                 # Country header
                 pitzg_rows.append({
@@ -828,48 +823,30 @@ def main():
                 pitzg_rows.append({
                     "Pozycja": "  poz. 48 WHT zaplacony PLN", "Kwota PLN": wht_r,
                 })
+                label_49 = "  poz. 49 Do zaplaty (47-48) PLN"
+                if nadwyzka:
+                    label_49 = "  poz. 49 Do zaplaty PLN  *** WHT przekracza podatek nalezny — nadwyzka przepada"
                 pitzg_rows.append({
-                    "Pozycja": "  poz. 49 Do zaplaty (47-48) PLN", "Kwota PLN": do_zaplaty,
+                    "Pozycja": label_49, "Kwota PLN": do_zaplaty,
                 })
                 pitzg_rows.append({})  # blank row
 
-            # KONTROLA block
+            # KONTROLA block — values from PIT38_Summary (source of truth)
             pitzg_rows.append({"Pozycja": "=== KONTROLA ==="})
             pitzg_rows.append({
-                "Pozycja": "Suma poz. 47 PIT/ZG",
-                "Kwota PLN": round(kontrola_poz47, 2),
+                "Pozycja": "SUMA (zgodna z PIT38_Summary \u2014 \u017ar\u00f3d\u0142o prawdy)",
             })
             pitzg_rows.append({
-                "Pozycja": "poz. 47 PIT-38",
+                "Pozycja": "poz. 47 Podatek obliczony (19%)",
                 "Kwota PLN": poz47,
             })
             pitzg_rows.append({
-                "Pozycja": "Roznica poz. 47",
-                "Kwota PLN": round(kontrola_poz47 - poz47_val, 2),
-            })
-            pitzg_rows.append({
-                "Pozycja": "Suma poz. 48 PIT/ZG",
-                "Kwota PLN": round(kontrola_poz48, 2),
-            })
-            pitzg_rows.append({
-                "Pozycja": "poz. 48 PIT-38",
+                "Pozycja": "poz. 48 Podatek zaplacony za granica (WHT)",
                 "Kwota PLN": poz48,
             })
             pitzg_rows.append({
-                "Pozycja": "Roznica poz. 48",
-                "Kwota PLN": round(kontrola_poz48 - poz48_val, 2),
-            })
-            pitzg_rows.append({
-                "Pozycja": "Suma poz. 49 PIT/ZG",
-                "Kwota PLN": round(kontrola_poz49, 2),
-            })
-            pitzg_rows.append({
-                "Pozycja": "poz. 49 PIT-38",
+                "Pozycja": "poz. 49 Do zaplaty",
                 "Kwota PLN": poz49,
-            })
-            pitzg_rows.append({
-                "Pozycja": "Roznica poz. 49",
-                "Kwota PLN": round(kontrola_poz49 - poz49_val, 2),
             })
 
             pitzg_cols = ["Pozycja", "Data", "Symbol", "Typ", "Waluta",
