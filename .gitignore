@@ -1,0 +1,14 @@
+# Sensitive data — IB activity statements and generated reports
+ibkr/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE / editor
+.claude/
+*.code-workspace
+
+# Excel output
+*.xlsx
