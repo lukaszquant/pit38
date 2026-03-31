@@ -762,8 +762,7 @@ def main():
                 ("poz. 49 — Do zaplaty (poz. 47 minus poz. 48)", poz49),
                 ("", ""),
                 ("WYMAGA POTWIERDZENIA PRZED ZLOZENIEM:", ""),
-                ("[ ] Podzial dywidend per kraj — potrzebny do PIT/ZG", ""),
-                ("[ ] Podzial odsetek per kraj — potrzebny do PIT/ZG", ""),
+                ("[ ] PIT/ZG dla czesci C — podzial zyskow/strat per kraj (zakladka PIT_ZG)", ""),
                 ("[ ] Weryfikacja stawek WHT per umowa UPO dla kazdego kraju", ""),
                 ("[ ] Sprawdzenie kompletnosci danych (Dividend Report / Form 1042-S z IBKR)", ""),
             ]
@@ -771,86 +770,117 @@ def main():
             pit38_df = pd.DataFrame(pit38_rows, columns=["Pozycja", "PLN"])
             pit38_df.to_excel(writer, sheet_name="PIT38_Summary", index=False)
 
-            # PIT/ZG sheet — per-country breakdown
+            # PIT/ZG(8) sheet — per-country capital gains (art. 30b, Section C)
+            # Map symbols to country of instrument
+            SYMBOL_COUNTRY = {
+                "VGOV": "IE", "VAGS": "IE", "IUSN": "IE", "IGWD": "IE",
+                "UC48": "IE", "AGAC": "IE", "EIMI": "IE", "IWDA": "IE",
+            }
+
+            # Collect sell rows from trade_details, assign country
+            sell_rows_by_country: dict[str, list[dict]] = defaultdict(list)
+            for td in trade_details:
+                if td["proceeds"] <= 0:
+                    continue  # skip buy rows
+                sym = td["symbol"]
+                country = SYMBOL_COUNTRY.get(sym, "??")
+                sell_rows_by_country[country].append(td)
+
             pitzg_rows: list[dict] = []
-            for c in sorted(country_data.keys()):
-                cd = country_data[c]
-                name = COUNTRY_NAMES.get(c, c)
-                przychod = cd["dividends_pln"] + cd["interest_pln"]
-                wht = cd["wht_div_pln"] + cd["wht_int_pln"]
-                podatek_19 = round(przychod * 0.19, 2)
-                wht_r = round(wht, 2)
-                do_zaplaty = round(max(0, podatek_19 - wht_r), 2)
-                nadwyzka = wht_r > podatek_19
+            sum_przychod_raw = 0.0
+            sum_koszty_raw = 0.0
+
+            for c in sorted(sell_rows_by_country.keys()):
+                sells = sell_rows_by_country[c]
+                name = COUNTRY_NAMES.get(c, "KRAJ NIEZNANY — wymaga weryfikacji")
 
                 # Country header
                 pitzg_rows.append({
-                    "Pozycja": f"=== {c} ({name}) ===",
-                    "Data": "", "Symbol": "", "Typ": "", "Waluta": "",
-                    "Kwota": "", "Kurs NBP": "", "Data NBP": "", "Kwota PLN": "",
+                    "Pozycja": f"=== {c} — {name} ===",
                 })
 
-                # Detail rows for this country
-                country_details = [
-                    r for r in all_income_details if r["country"] == c
-                ]
-                for r in sorted(country_details, key=lambda x: x["date"]):
+                # Detail rows — sum raw values, round only the totals
+                c_przychod_raw = 0.0
+                c_koszty_raw = 0.0
+                for s in sorted(sells, key=lambda x: x["date"]):
+                    p = round(s["proceeds_pln"], 2)
+                    b = round(abs(s["basis_pln"]), 2)
+                    cm = round(abs(s["comm_pln"]), 2)
+                    r = round(s["realized_pln"], 2)
+                    c_przychod_raw += s["proceeds_pln"]
+                    c_koszty_raw += abs(s["basis_pln"]) + abs(s["comm_pln"])
                     pitzg_rows.append({
                         "Pozycja": "",
-                        "Data": r["date"],
-                        "Symbol": r["symbol"],
-                        "Typ": r["type"],
-                        "Waluta": r["currency"],
-                        "Kwota": r["amount"],
-                        "Kurs NBP": r["nbp_rate"],
-                        "Data NBP": r["nbp_date"],
-                        "Kwota PLN": r["amount_pln"],
+                        "Data": s["date"],
+                        "Symbol": s["symbol"],
+                        "Ilosc": round(abs(s["quantity"]), 4),
+                        "Przychod PLN": p,
+                        "Koszty PLN": b + cm,
+                        "Wynik PLN": r,
                     })
+
+                c_przychod = round(c_przychod_raw, 2)
+                c_koszty = round(c_koszty_raw, 2)
+                c_income_raw = c_przychod_raw - c_koszty_raw
+                c_dochod = round(max(0, c_income_raw), 2)
+                c_strata = round(max(0, -c_income_raw), 2)
+
+                sum_przychod_raw += c_przychod_raw
+                sum_koszty_raw += c_koszty_raw
 
                 # Country summary
                 pitzg_rows.append({
-                    "Pozycja": "  Dywidendy PLN", "Kwota PLN": round(cd["dividends_pln"], 2),
+                    "Pozycja": "  Przychod lacznie (poz. 29/31)", "Przychod PLN": c_przychod,
                 })
                 pitzg_rows.append({
-                    "Pozycja": "  Odsetki PLN", "Kwota PLN": round(cd["interest_pln"], 2),
+                    "Pozycja": "  Koszty lacznie (poz. 30/32)", "Koszty PLN": c_koszty,
                 })
                 pitzg_rows.append({
-                    "Pozycja": "  Przychod brutto (podstawa) PLN", "Kwota PLN": round(przychod, 2),
+                    "Pozycja": "  Dochod / Strata", "Wynik PLN": round(c_income_raw, 2),
+                })
+                pitzg_rows.append({"Pozycja": ""})
+                pitzg_rows.append({
+                    "Pozycja": "  poz. 29 — Przychod (wiersz 2, broker zagraniczny)",
+                    "Przychod PLN": c_przychod,
                 })
                 pitzg_rows.append({
-                    "Pozycja": "  poz. 47 Podatek 19% PLN", "Kwota PLN": podatek_19,
+                    "Pozycja": "  poz. 30 — Koszty (wiersz 2)",
+                    "Koszty PLN": c_koszty,
                 })
                 pitzg_rows.append({
-                    "Pozycja": "  poz. 48 WHT zaplacony PLN", "Kwota PLN": wht_r,
+                    "Pozycja": "  poz. 31 — Dochod",
+                    "Wynik PLN": c_dochod,
                 })
-                label_49 = "  poz. 49 Do zaplaty (47-48) PLN"
-                if nadwyzka:
-                    label_49 = "  poz. 49 Do zaplaty PLN  *** WHT przekracza podatek nalezny — nadwyzka przepada"
                 pitzg_rows.append({
-                    "Pozycja": label_49, "Kwota PLN": do_zaplaty,
+                    "Pozycja": "  poz. 32 — Strata",
+                    "Wynik PLN": c_strata,
                 })
                 pitzg_rows.append({})  # blank row
 
-            # KONTROLA block — values from PIT38_Summary (source of truth)
-            pitzg_rows.append({"Pozycja": "=== KONTROLA ==="})
-            pitzg_rows.append({
-                "Pozycja": "SUMA (zgodna z PIT38_Summary \u2014 \u017ar\u00f3d\u0142o prawdy)",
-            })
-            pitzg_rows.append({
-                "Pozycja": "poz. 47 Podatek obliczony (19%)",
-                "Kwota PLN": poz47,
-            })
-            pitzg_rows.append({
-                "Pozycja": "poz. 48 Podatek zaplacony za granica (WHT)",
-                "Kwota PLN": poz48,
-            })
-            pitzg_rows.append({
-                "Pozycja": "poz. 49 Do zaplaty",
-                "Kwota PLN": poz49,
-            })
+            # KONTROLA block — cross-check vs PIT38_Summary
+            sum_przychod = round(sum_przychod_raw, 2)
+            sum_koszty = round(sum_koszty_raw, 2)
+            sum_income_raw = sum_przychod_raw - sum_koszty_raw
+            sum_dochod = round(max(0, sum_income_raw), 2)
+            sum_strata = round(max(0, -sum_income_raw), 2)
 
-            pitzg_cols = ["Pozycja", "Data", "Symbol", "Typ", "Waluta",
-                          "Kwota", "Kurs NBP", "Data NBP", "Kwota PLN"]
+            pitzg_rows.append({"Pozycja": "=== KONTROLA (vs PIT38_Summary) ==="})
+            for label, zg_val, pit38_val in [
+                ("Suma poz. 29 (przychod)", sum_przychod, poz22),
+                ("Suma poz. 30 (koszty)", sum_koszty, poz23),
+                ("Suma poz. 31 (dochod)", sum_dochod, poz28),
+                ("Suma poz. 32 (strata)", sum_strata, poz29),
+            ]:
+                ok = abs(zg_val - pit38_val) < 0.015
+                pitzg_rows.append({
+                    "Pozycja": label,
+                    "Przychod PLN": zg_val,
+                    "Koszty PLN": pit38_val,
+                    "Wynik PLN": ok,
+                })
+
+            pitzg_cols = ["Pozycja", "Data", "Symbol", "Ilosc",
+                          "Przychod PLN", "Koszty PLN", "Wynik PLN"]
             pitzg_df = pd.DataFrame(pitzg_rows, columns=pitzg_cols)
             pitzg_df.to_excel(writer, sheet_name="PIT_ZG", index=False)
 
