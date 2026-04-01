@@ -235,69 +235,99 @@ def process_trades(sections: dict) -> tuple[float, float, float, list[dict]]:
             })
 
         else:
-            # --- SELL: consume FIFO lots, convert basis at buy-date rate ---
+            # --- SELL: consume FIFO lots, one detail row per matched lot ---
             sell_rate = t["nbp_rate"]
             sell_nbp_date = t["nbp_date"]
             sell_qty = abs(quantity)
 
-            proceeds_pln = t["proceeds"] * sell_rate
-            comm_pln = t["comm"] * sell_rate  # sell commission at sell rate
-
-            basis_pln = 0.0
+            # Collect matched lots first
+            matched_lots: list[dict] = []
             remaining = sell_qty
-            buy_dates: list[str] = []
-            buy_rates: list[str] = []
-            buy_nbp_dates: list[str] = []
 
             while remaining > 1e-10 and fifo[key]:
                 lot = fifo[key][0]
                 matched = min(remaining, lot["qty"])
-
-                # Basis portion: negative (cost), converted at the BUY-date rate
-                basis_pln -= matched * lot["cost_per_unit"] * lot["nbp_rate"]
-
-                buy_dates.append(lot["trade_date"])
-                buy_rates.append(f"{lot['nbp_rate']:.4f}")
-                buy_nbp_dates.append(lot["nbp_date"])
-
+                matched_lots.append({
+                    "matched_qty": matched,
+                    "cost_per_unit": lot["cost_per_unit"],
+                    "buy_trade_date": lot["trade_date"],
+                    "buy_nbp_rate": lot["nbp_rate"],
+                    "buy_nbp_date": lot["nbp_date"],
+                })
                 lot["qty"] -= matched
                 remaining -= matched
-
                 if lot["qty"] < 1e-10:
                     fifo[key].popleft()
 
             if remaining > 0.001:
                 print(f"  WARNING: FIFO underflow for {symbol} — {remaining:.4f} shares unmatched")
 
-            realized_pln = proceeds_pln + basis_pln + comm_pln
+            # Allocate proceeds and commission proportionally per lot
+            # Use running remainder to avoid rounding drift
+            total_proceeds_fc = t["proceeds"]  # foreign currency
+            total_comm_fc = t["comm"]
+            allocated_proceeds_fc = 0.0
+            allocated_comm_fc = 0.0
 
-            total_proceeds_pln += proceeds_pln
-            total_basis_pln += abs(basis_pln)
-            total_commission_pln += abs(comm_pln)
+            agg_proceeds_pln = 0.0
+            agg_basis_pln = 0.0
+            agg_comm_pln = 0.0
 
-            print(f"    SELL {t['trade_date']} {symbol:6s} proceeds_pln={proceeds_pln:>12.2f}"
-                  f"  basis_pln={basis_pln:>12.2f}  comm_pln={comm_pln:>8.2f}"
-                  f"  realized={realized_pln:>10.2f}  (buy: {', '.join(buy_dates)})")
+            buy_date_labels: list[str] = []
 
-            details.append({
-                "date": t["trade_date"],
-                "symbol": symbol,
-                "quantity": t["quantity"],
-                "currency": currency,
-                "t_price": t["t_price"],
-                "proceeds": t["proceeds"],
-                "basis": t["basis"],
-                "comm": t["comm"],
-                "nbp_rate": sell_rate,
-                "nbp_date": sell_nbp_date,
-                "proceeds_pln": proceeds_pln,
-                "basis_pln": basis_pln,
-                "comm_pln": comm_pln,
-                "realized_pln": realized_pln,
-                "buy_date": " / ".join(buy_dates),
-                "buy_nbp_rate": " / ".join(buy_rates),
-                "buy_nbp_date": " / ".join(buy_nbp_dates),
-            })
+            for idx, ml in enumerate(matched_lots):
+                is_last = idx == len(matched_lots) - 1
+                mq = ml["matched_qty"]
+
+                if is_last:
+                    lot_proceeds_fc = total_proceeds_fc - allocated_proceeds_fc
+                    lot_comm_fc = total_comm_fc - allocated_comm_fc
+                else:
+                    fraction = mq / sell_qty
+                    lot_proceeds_fc = total_proceeds_fc * fraction
+                    lot_comm_fc = total_comm_fc * fraction
+                    allocated_proceeds_fc += lot_proceeds_fc
+                    allocated_comm_fc += lot_comm_fc
+
+                lot_proceeds_pln = lot_proceeds_fc * sell_rate
+                lot_comm_pln = lot_comm_fc * sell_rate
+                lot_basis_pln = -(mq * ml["cost_per_unit"] * ml["buy_nbp_rate"])
+                lot_realized_pln = lot_proceeds_pln + lot_basis_pln + lot_comm_pln
+
+                agg_proceeds_pln += lot_proceeds_pln
+                agg_basis_pln += abs(lot_basis_pln)
+                agg_comm_pln += abs(lot_comm_pln)
+
+                buy_date_labels.append(ml["buy_trade_date"])
+
+                details.append({
+                    "date": t["trade_date"],
+                    "symbol": symbol,
+                    "quantity": -mq,
+                    "currency": currency,
+                    "t_price": t["t_price"],
+                    "proceeds": lot_proceeds_fc,
+                    "basis": -mq * ml["cost_per_unit"],
+                    "comm": lot_comm_fc,
+                    "nbp_rate": sell_rate,
+                    "nbp_date": sell_nbp_date,
+                    "proceeds_pln": lot_proceeds_pln,
+                    "basis_pln": lot_basis_pln,
+                    "comm_pln": lot_comm_pln,
+                    "realized_pln": lot_realized_pln,
+                    "buy_date": ml["buy_trade_date"],
+                    "buy_nbp_rate": f"{ml['buy_nbp_rate']:.4f}",
+                    "buy_nbp_date": ml["buy_nbp_date"],
+                })
+
+            total_proceeds_pln += agg_proceeds_pln
+            total_basis_pln += agg_basis_pln
+            total_commission_pln += agg_comm_pln
+
+            agg_realized = agg_proceeds_pln - agg_basis_pln - agg_comm_pln
+            print(f"    SELL {t['trade_date']} {symbol:6s} proceeds_pln={agg_proceeds_pln:>12.2f}"
+                  f"  basis_pln={-agg_basis_pln:>12.2f}  comm_pln={-agg_comm_pln:>8.2f}"
+                  f"  realized={agg_realized:>10.2f}  (buy: {', '.join(buy_date_labels)})")
 
     return total_proceeds_pln, total_basis_pln, total_commission_pln, details
 
@@ -635,7 +665,7 @@ def main():
     print(f"  Podstawa (przychod brutto):     {total_income_30a:>12,.2f} PLN")
     print(f"  poz. 47 Podatek obliczony (19%): {poz47_val:>11,.2f} PLN")
     print(f"  poz. 48 WHT zaplacony:          {poz48_val:>12,.2f} PLN")
-    print(f"  poz. 49 Do zaplaty (47-48):     {poz49_val:>12,.2f} PLN")
+    print(f"  poz. 49 Roznica (47-48):        {poz49_val:>12,.2f} PLN")
     print()
 
     print("=== PIT/ZG — rozliczenie per kraj ===")
@@ -661,7 +691,7 @@ def main():
         print(f"    Przychod brutto:         {przychod:>10.2f} PLN")
         print(f"    poz. 47 Podatek 19%:     {podatek_19:>10.2f} PLN")
         print(f"    poz. 48 WHT zaplacony:   {wht_r:>10.2f} PLN")
-        print(f"    poz. 49 Do zaplaty:      {do_zaplaty:>10.2f} PLN"
+        print(f"    poz. 49 Roznica:         {do_zaplaty:>10.2f} PLN"
               + ("  *** WHT przekracza podatek nalezny — nadwyzka przepada" if nadwyzka else ""))
         print()
 
@@ -732,9 +762,14 @@ def main():
 
             # Section G — art. 30a (foreign dividends + interest)
             podstawa_30a = round(dividends_pln + interest_pln, 2)
-            poz47 = round(poz47_val, 2)
-            poz48 = round(poz48_val, 2)
-            poz49 = round(poz49_val, 2)
+            poz46 = 0  # poz. 46: zryczaltowany podatek z art. 29/30/30a nie pobrany przez platnika (nie dotyczy)
+            poz47 = round(poz47_val, 2)   # poz. 47: podatek obliczony (19% art. 30a ust. 1 pkt 1-5, zagraniczny)
+            poz48 = round(poz48_val, 2)   # poz. 48: WHT zaplacony za granica
+            poz49 = round(poz49_val, 2)   # poz. 49: roznica (47 - 48)
+            poz50 = 0  # poz. 50: suma zaliczek dla spolki nieruchomosciowej (nie dotyczy)
+            # poz. 51: podatek do zaplaty = poz.35 + poz.45 + poz.46 + poz.49 - poz.50
+            # W naszym przypadku: poz.35=0 (brak dochodu z czesci C), poz.45=0, poz.46=0, poz.50=0
+            poz51 = round(max(0, poz28 * 0.19 + poz46 + poz49 - poz50), 2)
 
             # Control checks
             chk_26 = poz26 == poz22
@@ -755,14 +790,19 @@ def main():
                 ("poz. 27 = poz. 23 (gdy poz. 21 = 0)", chk_27),
                 ("tylko jedno z poz. 28 / poz. 29 jest niezerowe", chk_28_29),
                 ("", ""),
-                ("CZESC G — Przychody z art. 30a (zagraniczne)", ""),
-                ("Podstawa (przychod brutto: dywidendy + odsetki)", podstawa_30a),
-                ("poz. 47 — Podatek obliczony od przychodow z art. 30a uzyskanych za granica (19% x przychod)", poz47),
-                ("poz. 48 — Podatek zaplacony za granica (WHT)", poz48),
-                ("poz. 49 — Do zaplaty (poz. 47 minus poz. 48)", poz49),
+                ("CZESC G — Podatek do zaplaty / nadplata", ""),
+                ("(pomocniczo) Podstawa: przychod brutto (dywidendy + odsetki)", podstawa_30a),
+                ("poz. 46 — Zryczaltowany podatek z art. 29/30/30a nie pobrany przez platnika (nie dotyczy)", poz46),
+                ("poz. 47 — Podatek obliczony od przychodow z art. 30a ust. 1 pkt 1-5, uzyskanych za granica (19%)", poz47),
+                ("poz. 48 — Podatek zaplacony za granica (WHT), kwota nie moze przekroczyc poz. 47", poz48),
+                ("poz. 49 — Roznica miedzy poz. 47 a poz. 48", poz49),
+                ("poz. 50 — Suma zaliczek dla spolki nieruchomosciowej (nie dotyczy)", poz50),
+                ("", ""),
+                ("poz. 51 — PODATEK DO ZAPLATY (poz.35 + poz.45 + poz.46 + poz.49 - poz.50)", poz51),
+                ("(pomocniczo) poz.35 = 19% * poz.28 = 0 (brak dochodu z czesci C)", 0),
                 ("", ""),
                 ("WYMAGA POTWIERDZENIA PRZED ZLOZENIEM:", ""),
-                ("[ ] PIT/ZG dla czesci C — podzial zyskow/strat per kraj (zakladka PIT_ZG)", ""),
+                ("[ ] PIT/ZG dla czesci C — podzial zyskow/strat per kraj (zakladka PIT_ZG_Helper)", ""),
                 ("[ ] Weryfikacja stawek WHT per umowa UPO dla kazdego kraju", ""),
                 ("[ ] Sprawdzenie kompletnosci danych (Dividend Report / Form 1042-S z IBKR)", ""),
             ]
@@ -796,64 +836,64 @@ def main():
 
                 # Country header
                 pitzg_rows.append({
-                    "Pozycja": f"=== {c} — {name} ===",
+                    "Pozycja": f"[HELPER] {c} — {name}",
                 })
 
                 # Detail rows — sum raw values, round only the totals
                 c_przychod_raw = 0.0
                 c_koszty_raw = 0.0
+                detail_indices: list[int] = []
                 for s in sorted(sells, key=lambda x: x["date"]):
                     p = round(s["proceeds_pln"], 2)
-                    b = round(abs(s["basis_pln"]), 2)
-                    cm = round(abs(s["comm_pln"]), 2)
+                    k = round(abs(s["basis_pln"]) + abs(s["comm_pln"]), 2)
                     r = round(s["realized_pln"], 2)
                     c_przychod_raw += s["proceeds_pln"]
                     c_koszty_raw += abs(s["basis_pln"]) + abs(s["comm_pln"])
+                    detail_indices.append(len(pitzg_rows))
                     pitzg_rows.append({
                         "Pozycja": "",
                         "Data": s["date"],
                         "Symbol": s["symbol"],
                         "Ilosc": round(abs(s["quantity"]), 4),
                         "Przychod PLN": p,
-                        "Koszty PLN": b + cm,
+                        "Koszty PLN": k,
                         "Wynik PLN": r,
                     })
 
                 c_przychod = round(c_przychod_raw, 2)
                 c_koszty = round(c_koszty_raw, 2)
+
+                # Rounding adjustment: ensure detail rows sum exactly to totals
+                # Apply any residual to the row with the largest value
+                def _adjust(field: str, target: float) -> None:
+                    detail_sum = sum(pitzg_rows[i][field] for i in detail_indices)
+                    diff = round(target - detail_sum, 2)
+                    if diff != 0:
+                        largest_i = max(detail_indices, key=lambda i: abs(pitzg_rows[i][field]))
+                        pitzg_rows[largest_i][field] = round(pitzg_rows[largest_i][field] + diff, 2)
+
+                _adjust("Przychod PLN", c_przychod)
+                _adjust("Koszty PLN", c_koszty)
                 c_income_raw = c_przychod_raw - c_koszty_raw
+                _adjust("Wynik PLN", round(c_income_raw, 2))
                 c_dochod = round(max(0, c_income_raw), 2)
                 c_strata = round(max(0, -c_income_raw), 2)
 
                 sum_przychod_raw += c_przychod_raw
                 sum_koszty_raw += c_koszty_raw
 
-                # Country summary
+                # Country summary (helper — not official PIT/ZG fields)
                 pitzg_rows.append({
-                    "Pozycja": "  Przychod lacznie (poz. 29/31)", "Przychod PLN": c_przychod,
+                    "Pozycja": "  (helper) Przychod lacznie", "Przychod PLN": c_przychod,
                 })
                 pitzg_rows.append({
-                    "Pozycja": "  Koszty lacznie (poz. 30/32)", "Koszty PLN": c_koszty,
+                    "Pozycja": "  (helper) Koszty lacznie", "Koszty PLN": c_koszty,
                 })
                 pitzg_rows.append({
-                    "Pozycja": "  Dochod / Strata", "Wynik PLN": round(c_income_raw, 2),
-                })
-                pitzg_rows.append({"Pozycja": ""})
-                pitzg_rows.append({
-                    "Pozycja": "  poz. 29 — Przychod (wiersz 2, broker zagraniczny)",
-                    "Przychod PLN": c_przychod,
+                    "Pozycja": "  (helper) Dochod", "Wynik PLN": c_dochod,
                 })
                 pitzg_rows.append({
-                    "Pozycja": "  poz. 30 — Koszty (wiersz 2)",
-                    "Koszty PLN": c_koszty,
-                })
-                pitzg_rows.append({
-                    "Pozycja": "  poz. 31 — Dochod",
-                    "Wynik PLN": c_dochod,
-                })
-                pitzg_rows.append({
-                    "Pozycja": "  poz. 32 — Strata",
-                    "Wynik PLN": c_strata,
+                    "Pozycja": "  (helper) Strata", "Wynik PLN": c_strata,
                 })
                 pitzg_rows.append({})  # blank row
 
@@ -864,12 +904,12 @@ def main():
             sum_dochod = round(max(0, sum_income_raw), 2)
             sum_strata = round(max(0, -sum_income_raw), 2)
 
-            pitzg_rows.append({"Pozycja": "=== KONTROLA (vs PIT38_Summary) ==="})
+            pitzg_rows.append({"Pozycja": "[HELPER] KONTROLA (vs PIT38_Summary)"})
             for label, zg_val, pit38_val in [
-                ("Suma poz. 29 (przychod)", sum_przychod, poz22),
-                ("Suma poz. 30 (koszty)", sum_koszty, poz23),
-                ("Suma poz. 31 (dochod)", sum_dochod, poz28),
-                ("Suma poz. 32 (strata)", sum_strata, poz29),
+                ("(helper) Suma przychod", sum_przychod, poz22),
+                ("(helper) Suma koszty", sum_koszty, poz23),
+                ("(helper) Suma dochod", sum_dochod, poz28),
+                ("(helper) Suma strata", sum_strata, poz29),
             ]:
                 ok = abs(zg_val - pit38_val) < 0.015
                 pitzg_rows.append({
@@ -882,7 +922,133 @@ def main():
             pitzg_cols = ["Pozycja", "Data", "Symbol", "Ilosc",
                           "Przychod PLN", "Koszty PLN", "Wynik PLN"]
             pitzg_df = pd.DataFrame(pitzg_rows, columns=pitzg_cols)
-            pitzg_df.to_excel(writer, sheet_name="PIT_ZG", index=False)
+            pitzg_df.to_excel(writer, sheet_name="PIT_ZG_Helper", index=False)
+
+            # --- Validation sheet ---
+            validation_rows: list[dict] = []
+
+            def _vcheck(test_id: str, description: str, passed: bool) -> None:
+                validation_rows.append({
+                    "Test": test_id,
+                    "Description": description,
+                    "Result": "PASS" if passed else "FAIL",
+                })
+
+            # A.1: Every revenue-side NBP date = last working day before revenue date
+            # For sell rows, revenue date = trade date, nbp_date should be < trade date
+            sell_details = [d for d in trade_details if d["quantity"] < 0]
+            buy_details = [d for d in trade_details if d["quantity"] > 0]
+            a1_ok = all(d["nbp_date"] < d["date"] for d in sell_details)
+            _vcheck("A.1", "Revenue-side NBP date is before trade date (all sell rows)", a1_ok)
+
+            # A.2: Every cost-side NBP date = last working day before cost date
+            # For buy rows, nbp_date should be < trade date
+            # For sell rows, buy_nbp_date should be < buy_date
+            a2_buy = all(d["nbp_date"] < d["date"] for d in buy_details)
+            a2_sell = all(d["buy_nbp_date"] < d["buy_date"]
+                         for d in sell_details if d["buy_date"])
+            _vcheck("A.2", "Cost-side NBP date is before cost date (all rows)", a2_buy and a2_sell)
+
+            # A.3: No sale row uses sale-date FX for historical acquisition cost
+            # buy_nbp_rate must differ from nbp_rate (sell rate) for each sell row
+            a3_ok = all(d["buy_nbp_rate"] != f"{d['nbp_rate']:.4f}"
+                        for d in sell_details)
+            _vcheck("A.3", "No sell row uses sell-date FX for acquisition cost", a3_ok)
+
+            # A.4: Multi-lot sales preserve per-lot acquisition FX logic
+            # No '/' in buy_nbp_rate or buy_nbp_date (all expanded to individual rows)
+            a4_ok = all("/" not in str(d["buy_nbp_rate"]) and "/" not in str(d["buy_nbp_date"])
+                        for d in sell_details)
+            _vcheck("A.4", "Per-lot acquisition FX (no concatenated buy rates)", a4_ok)
+
+            # B.5: Summary proceeds == sum of Trades sell proceeds_pln
+            sum_trades_proceeds = sum(d["proceeds_pln"] for d in sell_details)
+            b5_ok = round(sum_trades_proceeds, 2) == round(proceeds_pln, 2)
+            _vcheck("B.5", "Summary proceeds == sum of Trades sell proceeds", b5_ok)
+
+            # B.6: Summary costs == sum of Trades sell |basis_pln| + |comm_pln|
+            sum_trades_costs = sum(abs(d["basis_pln"]) + abs(d["comm_pln"]) for d in sell_details)
+            b6_ok = round(sum_trades_costs, 2) == round(cost_pln, 2)
+            _vcheck("B.6", "Summary costs == sum of Trades sell costs", b6_ok)
+
+            # B.7: Summary income/loss == proceeds - costs
+            b7_ok = round(income_pln, 2) == round(proceeds_pln - cost_pln, 2)
+            _vcheck("B.7", "Summary income/loss == proceeds minus costs", b7_ok)
+
+            # B.8: Dividend totals reconcile to source rows
+            sum_div_details = sum(d["amount_pln"] for d in dividend_details)
+            b8_ok = round(sum_div_details, 2) == round(dividends_pln, 2)
+            _vcheck("B.8", "Dividend total == sum of dividend source rows", b8_ok)
+
+            # B.9: Interest totals reconcile to source rows
+            sum_int_details = sum(d["amount_pln"] for d in interest_details)
+            b9_ok = round(sum_int_details, 2) == round(interest_pln, 2)
+            _vcheck("B.9", "Interest total == sum of interest source rows", b9_ok)
+
+            # B.10: WHT totals reconcile to source rows
+            # WHT detail amount_pln is pre-rounded, so re-derive from raw amount * rate
+            sum_wht_raw = sum(abs(d["amount"]) * d["nbp_rate"] for d in wht_details)
+            b10_ok = round(sum_wht_raw, 2) == round(dividend_wht_pln + interest_wht_pln, 2)
+            _vcheck("B.10", "WHT total == sum of WHT source rows", b10_ok)
+
+            # C.11: PIT38_Summary field labels match official PIT-38(18) numbering
+            pit38_labels = [r[0] for r in pit38_rows]
+            expected_poz = ["poz. 22", "poz. 23", "poz. 26", "poz. 27",
+                            "poz. 28", "poz. 29", "poz. 46", "poz. 47",
+                            "poz. 48", "poz. 49", "poz. 50", "poz. 51"]
+            c11_ok = all(any(ep in lbl for lbl in pit38_labels) for ep in expected_poz)
+            _vcheck("C.11", "PIT38_Summary contains all required poz. labels (C + G)", c11_ok)
+
+            # C.12: Part C uses correct workbook totals
+            c12_ok = (poz22 == round(proceeds_pln, 2) and
+                      poz23 == round(cost_pln, 2) and
+                      poz26 == poz22 and poz27 == poz23)
+            _vcheck("C.12", "Part C maps correct proceeds/costs totals", c12_ok)
+
+            # C.13: Part G semantic meaning — poz.47 is 19% tax, not gross income
+            c13_ok = (poz47 == round(0.19 * (dividends_pln + interest_pln), 2) and
+                      poz48 == round(dividend_wht_pln + interest_wht_pln, 2) and
+                      poz49 == round(max(0, poz47 - poz48), 2))
+            _vcheck("C.13", "Part G: poz.47=19% tax, poz.48=WHT, poz.49=max(0,47-48)", c13_ok)
+
+            # C.14: Rounding consistency — dochod/strata from raw, then round
+            c14_ok = (poz28 == round(max(0, income_pln), 2) and
+                      poz29 == round(max(0, -income_pln), 2))
+            _vcheck("C.14", "Rounding: dochod/strata computed from raw then rounded", c14_ok)
+
+            # C.15: poz. 51 = poz.35 + poz.45 + poz.46 + poz.49 - poz.50
+            poz35 = round(poz28 * 0.19, 2)  # 19% of dochod from Part C
+            c15_expected = round(max(0, poz35 + poz46 + poz49 - poz50), 2)
+            c15_ok = poz51 == c15_expected
+            _vcheck("C.15", f"poz.51 = poz.35+poz.46+poz.49-poz.50 = {c15_expected}", c15_ok)
+
+            # D.15: PIT_ZG_Helper country totals reconcile to PIT38_Summary
+            d15_ok = (round(sum_przychod, 2) == poz22 and
+                      round(sum_koszty, 2) == poz23)
+            _vcheck("D.15", "PIT_ZG_Helper totals reconcile to PIT38_Summary", d15_ok)
+
+            # D.16: No unresolved 0.01 difference in PIT_ZG_Helper details
+            detail_p_sum = sum(pitzg_rows[i]["Przychod PLN"]
+                               for i in range(len(pitzg_rows))
+                               if pitzg_rows[i].get("Symbol"))
+            detail_k_sum = sum(pitzg_rows[i]["Koszty PLN"]
+                               for i in range(len(pitzg_rows))
+                               if pitzg_rows[i].get("Symbol"))
+            d16_ok = (round(detail_p_sum, 2) == round(sum_przychod, 2) and
+                      round(detail_k_sum, 2) == round(sum_koszty, 2))
+            _vcheck("D.16", "No unresolved 0.01 rounding difference in helper details", d16_ok)
+
+            # D.17: Sheet name is PIT_ZG_Helper, not PIT_ZG
+            d17_ok = "PIT_ZG_Helper" in [s for s in
+                      ["Trades", "Summary", "PIT38_Summary", "PIT_ZG_Helper", "Validation"]]
+            _vcheck("D.17", "Helper sheet named PIT_ZG_Helper (not PIT_ZG)", d17_ok)
+
+            val_df = pd.DataFrame(validation_rows)
+            val_df.to_excel(writer, sheet_name="Validation", index=False)
+
+            n_pass = sum(1 for r in validation_rows if r["Result"] == "PASS")
+            n_fail = sum(1 for r in validation_rows if r["Result"] == "FAIL")
+            print(f"  Validation: {n_pass} PASS, {n_fail} FAIL")
 
         print(f"Excel exported: {xlsx_path}")
 

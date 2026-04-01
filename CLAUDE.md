@@ -13,7 +13,7 @@ Requires Python venv at `.venv/` with: `pandas`, `requests`, `openpyxl`.
 - **NBP exchange rate**: last working day BEFORE the trade/income date (art. 11a ustawy o PIT) — not the date itself, not settlement date
 - **FIFO cost basis**: sell trades use the original BUY-date FX rate for cost basis, not the sell-date rate
 - **Section C wiersz 2** (poz. 22-29): capital gains from foreign broker (no PIT-8C)
-- **Section G** (poz. 47-49): art. 30a income (dividends + interest) — poz. 47 is the calculated 19% tax, NOT gross income
+- **Section G** (poz. 47-49): art. 30a income (dividends + interest) — poz. 47 is the calculated 19% tax (art. 30a ust. 1 pkt 1-5, foreign), poz. 48 is WHT paid abroad, poz. 49 is the difference (47 minus 48)
 - **PIT/ZG(8)**: per-country attachment for Section C capital gains only. Dividends/interest do NOT go in PIT/ZG.
 - **Rounding**: always compute dochod/strata from raw (unrounded) values, then round. Never subtract two independently rounded values.
 
